@@ -26,7 +26,7 @@ class FormDataManager(context: Context) {
     }
 
     companion object {
-        private const val MAX_STORED_PER_FIELD = 25
+        private const val MAX_STORED_PER_FIELD = 10
         private const val MAX_DISPLAYED_SUGGESTIONS = 8
         private const val DECAY_INTERVAL_DAYS = 30
         private const val DECAY_FACTOR = 0.9f
