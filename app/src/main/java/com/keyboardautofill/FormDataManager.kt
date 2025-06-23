@@ -11,10 +11,19 @@ class FormDataManager(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("form_autofill", Context.MODE_PRIVATE)
     private val metadataPrefs: SharedPreferences = context.getSharedPreferences("suggestion_metadata", Context.MODE_PRIVATE)
 
-    // LRU Cache for hot queries - keeping recent lookups fast
+    private val fieldTries: Map<FieldType, SuggestionTrie> = FieldType.values()
+        .filter { it != FieldType.UNKNOWN }
+        .associateWith { SuggestionTrie() }
+
+
     private val hotCache = mutableMapOf<String, List<RankedSuggestion>>()
     private val cacheAccessOrder = mutableListOf<String>()
     private val maxCacheSize = 50
+
+    init {
+        // Load existing data into tries on startup
+        initializeTriesFromStorage()
+    }
 
     companion object {
         private const val MAX_STORED_PER_FIELD = 25
@@ -144,36 +153,38 @@ class FormDataManager(context: Context) {
         if (cached != null) {
             updateCacheAccess(cacheKey)
             Log.d("SuggestionDebug", "Cache hit for $cacheKey")
-            return cached.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS) // LIMIT DISPLAY
+            return cached.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS)
         }
 
-        // Get all suggestions for field type
-        val allSuggestions = getFieldSuggestions(fieldType)
-        Log.d("SuggestionDebug", "Total stored for $fieldType: ${allSuggestions.size}")
+        // NEW: Use trie for efficient prefix matching
+        val trie = fieldTries[fieldType]
+        if (trie == null) {
+            Log.w("SuggestionDebug", "No trie found for $fieldType")
+            return emptyList()
+        }
 
-        // Filter by partial input if provided
-        val filteredSuggestions = if (partialInput.isBlank()) {
-            allSuggestions
+        val matchingKeys = if (partialInput.isBlank()) {
+            trie.getAllStorageKeys()
         } else {
-            allSuggestions.filter {
-                it.lowercase().startsWith(partialInput.lowercase())
-            }
+            trie.findMatches(partialInput)
         }
+
+        Log.d("SuggestionDebug", "Trie found ${matchingKeys.size} matches for '$partialInput' in $fieldType")
 
         // Get metadata and rank suggestions
-        val rankedSuggestions = filteredSuggestions.mapNotNull { suggestion ->
-            val key = generateStorageKey(fieldType, suggestion)
+        val rankedSuggestions = matchingKeys.mapNotNull { key ->
             val metadata = getMetadata(key)
             if (metadata != null) {
                 val score = metadata.getRankingScore()
-                Log.d("SuggestionDebug", "Suggestion '$suggestion': clicks=${metadata.clickCount}, types=${metadata.typeCount}, score=$score")
-                RankedSuggestion(suggestion, score)
+                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': clicks=${metadata.clickCount}, types=${metadata.typeCount}, score=$score")
+                RankedSuggestion(metadata.value, score)
             } else {
-                RankedSuggestion(suggestion, 2.0f) // Fallback score
+                Log.w("SuggestionDebug", "No metadata found for key: $key")
+                null
             }
         }.sortedByDescending { it.score }
 
-        // Cache the result (full list) but return limited display
+        // Cache the result and return limited display
         cacheResult(cacheKey, rankedSuggestions)
 
         val displayList = rankedSuggestions.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS)
@@ -284,12 +295,33 @@ class FormDataManager(context: Context) {
             if (lowestScoringEntry != null) {
                 existing.remove(lowestScoringEntry)
                 removeMetadata(fieldType, lowestScoringEntry)
+
+                // NEW: Remove from trie
+                val trie = fieldTries[fieldType]
+                val keyToRemove = generateStorageKey(fieldType, lowestScoringEntry)
+                trie?.remove(lowestScoringEntry, keyToRemove)
+
                 Log.d("SuggestionDebug", "Evicted lowest scoring entry: '$lowestScoringEntry'")
             }
         }
 
         prefs.edit().putStringSet(listKey, existing).apply()
+
+        // NEW: Add to trie
+        val trie = fieldTries[fieldType]
+        val storageKey = generateStorageKey(fieldType, value)
+        trie?.insert(value, storageKey)
+
         Log.d("SuggestionDebug", "Stored '$value' in $fieldType. Total entries: ${existing.size}")
+    }
+
+    private fun removeMetadata(fieldType: FieldType, value: String) {
+        val key = generateStorageKey(fieldType, value)
+        metadataPrefs.edit().remove(key).apply()
+
+        // NEW: Remove from trie
+        val trie = fieldTries[fieldType]
+        trie?.remove(value, key)
     }
 
     private fun applyAgeDecay(fieldType: FieldType) {
@@ -322,11 +354,6 @@ class FormDataManager(context: Context) {
         }
     }
 
-    private fun removeMetadata(fieldType: FieldType, value: String) {
-        val key = generateStorageKey(fieldType, value)
-        metadataPrefs.edit().remove(key).apply()
-    }
-
     private fun getFieldSuggestions(fieldType: FieldType): List<String> {
         val listKey = fieldType.name
         return prefs.getStringSet(listKey, emptySet())?.toList() ?: emptyList()
@@ -357,6 +384,32 @@ class FormDataManager(context: Context) {
             hotCache.remove(key)
             cacheAccessOrder.remove(key)
         }
-        Log.d("SuggestionDebug", "Cleared cache entries for $fieldType")
+
+        // NEW: Compress trie to reclaim memory
+        val trie = fieldTries[fieldType]
+        trie?.compress()
+
+        Log.d("SuggestionDebug", "Cleared cache entries for $fieldType and compressed trie")
+    }
+
+    // ============================================
+    // Trie utils
+
+    private fun initializeTriesFromStorage() {
+        Log.d("SuggestionDebug", "Initializing tries from storage...")
+
+        FieldType.values().forEach { fieldType ->
+            if (fieldType == FieldType.UNKNOWN) return@forEach
+
+            val suggestions = getFieldSuggestions(fieldType)
+            val trie = fieldTries[fieldType]
+
+            suggestions.forEach { suggestion ->
+                val key = generateStorageKey(fieldType, suggestion)
+                trie?.insert(suggestion, key)
+            }
+
+            Log.d("SuggestionDebug", "Loaded ${suggestions.size} suggestions into $fieldType trie")
+        }
     }
 }
