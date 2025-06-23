@@ -87,11 +87,16 @@ class AutofillManager(
     }
 
     fun onFieldChanged() {
-        // This is called during typing - update our tracking
+        // This is called during typing - update our tracking AND refresh suggestions
         val newContent = getCurrentFieldContent()
         if (newContent != lastFieldContent) {
             lastFieldContent = newContent
             Log.d("SuggestionDebug", "Field content updated: '$lastFieldContent'")
+
+            // NEW: Update suggestions based on current typing
+            if (currentFieldType != FormDataManager.FieldType.UNKNOWN) {
+                showSuggestionsForField(currentFieldType)
+            }
         }
     }
 
@@ -187,9 +192,11 @@ class AutofillManager(
     }
 
     private fun showSuggestionsForField(fieldType: FormDataManager.FieldType) {
-        val suggestions = formDataManager.getSuggestions(fieldType)
+        // NEW: Get current field content for prefix matching
+        val currentContent = getCurrentFieldContent().trim()
+        val suggestions = formDataManager.getSuggestions(fieldType, currentContent)
 
-        Log.d("SuggestionDebug", "Showing suggestions for $fieldType: ${suggestions.size} items")
+        Log.d("SuggestionDebug", "Showing suggestions for $fieldType with prefix '$currentContent': ${suggestions.size} items")
         suggestions.forEachIndexed { index, suggestion ->
             Log.d("SuggestionDebug", "  [$index]: '$suggestion'")
         }
