@@ -18,101 +18,144 @@ class WebFormDetector(private val context: Context) {
 
     // JavaScript to inject for form field detection
     private val formDetectionScript = """
-        (function() {
-            // Helper to get field label
+    (function() {
+        console.log('AutofillDetector: Script injected');
+        
+        // Enhanced field detection
+        function analyzeField(input, index) {
+            // Get computed styles
+            const styles = window.getComputedStyle(input);
+            const isVisible = styles.display !== 'none' && 
+                            styles.visibility !== 'hidden' && 
+                            input.offsetWidth > 0;
+            
+            if (!isVisible) return null;
+            
+            // Get field boundaries
+            const rect = input.getBoundingClientRect();
+            
+            // Enhanced label detection
             function getFieldLabel(input) {
-                // Check for associated label
-                if (input.id) {
-                    const label = document.querySelector('label[for="' + input.id + '"]');
-                    if (label) return label.textContent.trim();
+                // Multiple strategies for label detection
+                const strategies = [
+                    // Strategy 1: Label with 'for' attribute
+                    () => {
+                        if (input.id) {
+                            const label = document.querySelector(`label[for="\${'$'}{input.id}"]`);
+                            if (label) return label.textContent.trim();
+                        }
+                    },
+                    // Strategy 2: Google Forms
+                    () => {
+                        const googleLabel = input.closest('.AgroKb')?.parentElement?.querySelector('.M7eMe');
+                        if (googleLabel) return googleLabel.textContent.trim();
+                    },
+                    // Strategy 3: Parent label
+                    () => {
+                        const parentLabel = input.closest('label');
+                        if (parentLabel) {
+                            const text = Array.from(parentLabel.childNodes)
+                                .filter(node => node.nodeType === 3)
+                                .map(node => node.textContent.trim())
+                                .join(' ');
+                            if (text) return text;
+                        }
+                    },
+                    // Strategy 4: Previous sibling
+                    () => {
+                        let prev = input.previousElementSibling;
+                        while (prev && prev.tagName !== 'LABEL') {
+                            if (prev.textContent.trim()) return prev.textContent.trim();
+                            prev = prev.previousElementSibling;
+                        }
+                        if (prev) return prev.textContent.trim();
+                    },
+                    // Strategy 5: Aria label
+                    () => input.getAttribute('aria-label'),
+                    // Strategy 6: Placeholder
+                    () => input.placeholder,
+                    // Strategy 7: Title
+                    () => input.title
+                ];
+                
+                for (const strategy of strategies) {
+                    const label = strategy();
+                    if (label && label.trim()) return label.trim();
                 }
-                
-                // Check for Google Forms specific structure
-                const googleFormLabel = input.closest('.AgroKb')?.parentElement?.querySelector('.M7eMe');
-                if (googleFormLabel) return googleFormLabel.textContent.trim();
-                
-                // Check for parent label
-                const parentLabel = input.closest('label');
-                if (parentLabel) return parentLabel.textContent.trim();
-                
-                // Check for aria-label
-                if (input.getAttribute('aria-label')) return input.getAttribute('aria-label');
-                
-                // Check for placeholder
-                if (input.placeholder) return input.placeholder;
                 
                 return '';
             }
             
-            // Analyze single field
-            function analyzeField(input) {
-                const fieldData = {
-                    type: input.type || 'text',
-                    name: input.name || '',
-                    id: input.id || '',
-                    className: input.className || '',
-                    placeholder: input.placeholder || '',
-                    label: getFieldLabel(input),
-                    autocomplete: input.autocomplete || '',
-                    ariaLabel: input.getAttribute('aria-label') || '',
-                    isRequired: input.required || false,
-                    isGoogleForm: !!input.closest('.freebirdFormviewerViewItemsItemItem')
-                };
-                
-                // Log to console for debugging
-                console.log('WebForm Field Detected:', fieldData);
-                
-                // Send to Android
-                if (window.$JS_INTERFACE_NAME) {
-                    window.$JS_INTERFACE_NAME.onFieldDetected(JSON.stringify(fieldData));
-                }
-            }
+            const fieldData = {
+                index: index,
+                type: input.type || 'text',
+                name: input.name || '',
+                id: input.id || '',
+                className: input.className || '',
+                placeholder: input.placeholder || '',
+                label: getFieldLabel(input),
+                autocomplete: input.autocomplete || '',
+                pattern: input.pattern || '',
+                maxLength: input.maxLength || -1,
+                ariaLabel: input.getAttribute('aria-label') || '',
+                isRequired: input.required || input.getAttribute('aria-required') === 'true',
+                isGoogleForm: !!input.closest('.freebirdFormviewerViewItemsItemItem'),
+                position: {
+                    top: rect.top,
+                    left: rect.left,
+                    width: rect.width,
+                    height: rect.height
+                },
+                value: input.value ? '[has value]' : '[empty]'
+            };
             
-            // Find all input fields
-            function detectAllFields() {
-                const inputs = document.querySelectorAll('input[type="text"], input[type="email"], input[type="tel"], input[type="number"], input[type="url"], input:not([type]), textarea');
-                
-                console.log('WebForm Detection: Found ' + inputs.length + ' input fields');
-                
-                inputs.forEach((input, index) => {
-                    setTimeout(() => analyzeField(input), index * 50); // Stagger to avoid blocking
-                });
-            }
+            return fieldData;
+        }
+        
+        // Detect all fields
+        function detectAllFields() {
+            const inputs = document.querySelectorAll(
+                'input[type="text"], input[type="email"], input[type="tel"], ' +
+                'input[type="number"], input[type="url"], input[type="search"], ' +
+                'input:not([type]), textarea'
+            );
             
-            // Detect focused field
-            function detectFocusedField() {
-                const activeElement = document.activeElement;
-                if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
-                    analyzeField(activeElement);
-                }
-            }
+            console.log(`AutofillDetector: Found \${'$'}{inputs.length} potential input fields`);
             
-            // Run detection
-            detectAllFields();
-            
-            // Monitor for dynamic fields
-            const observer = new MutationObserver((mutations) => {
-                let shouldRedetect = false;
-                mutations.forEach((mutation) => {
-                    if (mutation.addedNodes.length > 0) {
-                        mutation.addedNodes.forEach((node) => {
-                            if (node.querySelector && node.querySelector('input, textarea')) {
-                                shouldRedetect = true;
-                            }
-                        });
-                    }
-                });
-                if (shouldRedetect) {
-                    setTimeout(detectAllFields, 500);
+            const fields = [];
+            inputs.forEach((input, index) => {
+                const fieldData = analyzeField(input, index);
+                if (fieldData) {
+                    fields.push(fieldData);
                 }
             });
             
-            observer.observe(document.body, { childList: true, subtree: true });
+            // Send batch data
+            if (window.$JS_INTERFACE_NAME && fields.length > 0) {
+                window.$JS_INTERFACE_NAME.onBatchFieldsDetected(JSON.stringify(fields));
+            }
             
-            // Expose function for on-demand detection
-            window.detectWebFormFields = detectFocusedField;
-        })();
-    """.trimIndent()
+            return fields;
+        }
+        
+        // Initial detection
+        setTimeout(detectAllFields, 100);
+        
+        // Detect on focus
+        document.addEventListener('focusin', (e) => {
+            if (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA') {
+                console.log('AutofillDetector: Field focused');
+                const fieldData = analyzeField(e.target, -1);
+                if (fieldData && window.$JS_INTERFACE_NAME) {
+                    window.$JS_INTERFACE_NAME.onFieldDetected(JSON.stringify(fieldData));
+                }
+            }
+        });
+        
+        // Return detection count
+        return detectAllFields().length;
+    })();
+""".trimIndent()
 
     private val handler = Handler(Looper.getMainLooper())
     private val detectedFields = mutableMapOf<String, String>()
