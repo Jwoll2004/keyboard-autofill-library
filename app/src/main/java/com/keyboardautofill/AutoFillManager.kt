@@ -33,6 +33,16 @@ class AutofillManager(
     // ============================================
     // Main Integration Points
 
+    fun isWebFormContext(editorInfo: EditorInfo?): Boolean {
+        if (editorInfo == null) return false
+
+        val packageName = editorInfo.packageName ?: return false
+        return packageName.contains("chrome") ||
+                packageName.contains("browser") ||
+                packageName.contains("webview") ||
+                packageName.contains("firefox")
+    }
+
     fun onFieldFocused(editorInfo: EditorInfo?) {
         Log.d("SuggestionDebug", "=== onFieldFocused called ===")
         Log.d("SuggestionDebug", "EditorInfo: ${editorInfo?.let { "package=${it.packageName}, fieldId=${it.fieldId}, hint='${it.hintText}'" } ?: "null"}")
@@ -80,6 +90,12 @@ class AutofillManager(
             else -> {
                 showSuggestionsForField(currentFieldType)
             }
+        }
+
+        if (isWebFormContext(editorInfo)) {
+            Log.d("SuggestionDebug", "📱 Web form detected - Package: ${editorInfo.packageName}")
+            Log.d("SuggestionDebug", "📱 Field info available from IME: type=$currentFieldType")
+            // Note: Actual web form field detection will happen via JS injection
         }
 
         // Update tracking for next field change
