@@ -5,6 +5,7 @@ import android.util.Log
 import android.view.View
 import android.view.inputmethod.EditorInfo
 import androidx.recyclerview.widget.RecyclerView
+import com.keyboardautofill.web.WebAutofillIntegration
 
 /**
  * Main autofill coordination with proper field completion detection
@@ -29,6 +30,12 @@ class AutofillManager(
     private var lastFieldContent = ""
     private var currentFieldHash = ""
     private var lastProcessedFieldHash = ""
+    private var webIntegration: WebAutofillIntegration? = null
+
+    init {
+        webIntegration = WebAutofillIntegration(inputMethodService, this, formDataManager, rootView)
+    }
+
 
     // ============================================
     // Main Integration Points
@@ -40,6 +47,26 @@ class AutofillManager(
         if (editorInfo == null) {
             Log.d("SuggestionDebug", "EditorInfo is null - hiding suggestions")
             suggestionBarUI.hideSuggestionBar()
+            return
+        }
+
+        val detectedType = webIntegration?.onFieldFocused(editorInfo) ?: FormDataManager.FieldType.UNKNOWN
+        val isWebContext = webIntegration?.isInWebContext() ?: false
+
+        if (isWebContext) {
+            Log.d("SuggestionDebug", "Web context detected - using web form handler")
+            currentFieldType = detectedType
+
+            // Show suggestions for web context
+            val webSuggestions = webIntegration?.getSuggestions() ?: emptyList()
+            if (webSuggestions.isNotEmpty()) {
+                suggestionBarUI.updateSuggestions(webSuggestions)
+                suggestionBarUI.showSuggestionBar()
+                Log.d("SuggestionDebug", "✓ Web suggestions shown: ${webSuggestions.size} items")
+            } else {
+                suggestionBarUI.hideSuggestionBar()
+                Log.d("SuggestionDebug", "✗ No web suggestions available")
+            }
             return
         }
 
@@ -87,13 +114,27 @@ class AutofillManager(
     }
 
     fun onFieldChanged() {
-        // This is called during typing - update our tracking AND refresh suggestions
+        if (webIntegration?.isInWebContext() == true) {
+            webIntegration?.onFieldChanged()
+
+            // Update web suggestions with current content
+            val newContent = getCurrentFieldContent()
+            val webSuggestions = webIntegration?.getSuggestions(newContent) ?: emptyList()
+
+            if (webSuggestions.isNotEmpty()) {
+                suggestionBarUI.updateSuggestions(webSuggestions)
+                suggestionBarUI.showSuggestionBar()
+            } else {
+                suggestionBarUI.hideSuggestionBar()
+            }
+            return
+        }
+        // during typing - update our tracking AND refresh suggestions
         val newContent = getCurrentFieldContent()
         if (newContent != lastFieldContent) {
             lastFieldContent = newContent
             Log.d("SuggestionDebug", "Field content updated: '$lastFieldContent'")
 
-            // NEW: Update suggestions based on current typing
             if (currentFieldType != FormDataManager.FieldType.UNKNOWN) {
                 showSuggestionsForField(currentFieldType)
             }

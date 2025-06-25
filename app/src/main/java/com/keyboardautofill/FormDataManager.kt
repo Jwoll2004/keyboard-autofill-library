@@ -412,4 +412,38 @@ class FormDataManager(context: Context) {
             Log.d("SuggestionDebug", "Loaded ${suggestions.size} suggestions into $fieldType trie")
         }
     }
+
+    // =========================
+    // Web form logic
+    // Add to FormDataManager class:
+    fun learnFromWebInput(fieldType: FieldType, value: String, confidence: Float) {
+        val cleanValue = value.trim()
+        Log.d("SuggestionDebug", "=== LEARN FROM WEB INPUT ===")
+        Log.d("SuggestionDebug", "Field: $fieldType, Web entry: '$cleanValue', Confidence: $confidence")
+
+        if (cleanValue.isBlank() || cleanValue.length < 2) {
+            Log.d("SuggestionDebug", "Web input too short - skipping")
+            return
+        }
+
+        // Apply confidence-based learning
+        val adjustedTypeCount = if (confidence > 0.8f) 1 else 0 // Only count high-confidence detections
+
+        val key = generateStorageKey(fieldType, cleanValue)
+        val existing = getMetadata(key)
+
+        if (existing != null) {
+            existing.typeCount += adjustedTypeCount
+            existing.lastUsed = System.currentTimeMillis()
+            storeMetadata(key, existing)
+            Log.d("SuggestionDebug", "✅ Updated web entry: typeCount=${existing.typeCount}")
+        } else {
+            val newNode = SuggestionNode(cleanValue, clickCount = 0, typeCount = adjustedTypeCount)
+            storeMetadata(key, newNode)
+            addToFieldList(fieldType, cleanValue)
+            Log.d("SuggestionDebug", "✅ New web entry: typeCount=$adjustedTypeCount, confidence=$confidence")
+        }
+
+        clearCacheForFieldType(fieldType)
+    }
 }
