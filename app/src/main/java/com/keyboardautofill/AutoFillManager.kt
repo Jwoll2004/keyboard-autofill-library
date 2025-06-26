@@ -34,66 +34,45 @@ class AutofillManager(
     // Main Integration Points
 
     fun onFieldFocused(editorInfo: EditorInfo?) {
-        Log.d("SuggestionDebug", "=== onFieldFocused called ===")
-        Log.d("SuggestionDebug", "EditorInfo: ${editorInfo?.let { "package=${it.packageName}, fieldId=${it.fieldId}, hint='${it.hintText}'" } ?: "null"}")
+        Log.d("AutofillFlow", "=== Field Focus ===")
 
         if (editorInfo == null) {
-            Log.d("SuggestionDebug", "EditorInfo is null - hiding suggestions")
             suggestionBarUI.hideSuggestionBar()
             return
         }
 
         val newFieldHash = generateFieldHash(editorInfo)
-        Log.d("SuggestionDebug", "New field hash: $newFieldHash")
-        Log.d("SuggestionDebug", "Last processed hash: $lastProcessedFieldHash")
 
-        // Only process if this is actually a different field OR if we haven't processed any field yet
-        if (newFieldHash == lastProcessedFieldHash && lastProcessedFieldHash.isNotEmpty()) {
-            Log.d("SuggestionDebug", "Same field as last time - skipping duplicate processing")
-            return
+        // Save previous field data before switching
+        if (lastProcessedFieldHash.isNotEmpty() &&
+            newFieldHash != lastProcessedFieldHash &&
+            currentFieldType != FormDataManager.FieldType.UNKNOWN) {
+            saveCurrentFieldContent()
         }
 
-        // Save previous field data before switching (if we have valid previous data)
-        if (lastProcessedFieldHash.isNotEmpty() && previousFieldType != FormDataManager.FieldType.UNKNOWN) {
-            Log.d("SuggestionDebug", "Saving previous field before switching")
-            savePreviousFieldIfCompleted()
-        }
-
-        // Update current field info - ALWAYS detect field type, even for first field
-        val detectedFieldType = formDataManager.detectFieldType(editorInfo)
-        currentFieldType = detectedFieldType
+        // Update field tracking
+        currentFieldType = formDataManager.detectFieldType(editorInfo)
         currentFieldHash = newFieldHash
         lastProcessedFieldHash = newFieldHash
-
-        Log.d("SuggestionDebug", "Field focused - type: $currentFieldType, hash: $currentFieldHash")
-        Log.d("SuggestionDebug", "Previous field type: $previousFieldType")
-
-        // Get current field content immediately
         lastFieldContent = getCurrentFieldContent()
-        Log.d("SuggestionDebug", "Current field content on focus: '$lastFieldContent'")
 
-        when (currentFieldType) {
-            FormDataManager.FieldType.UNKNOWN -> {
-                suggestionBarUI.hideSuggestionBar()
-                Log.d("SuggestionDebug", "Unknown field type - hiding suggestions")
-            }
-            else -> {
-                showSuggestionsForField(currentFieldType)
-            }
+        Log.d("AutofillFlow", "Field: $currentFieldType, Content: '$lastFieldContent'")
+
+        // Show suggestions for valid fields
+        if (currentFieldType != FormDataManager.FieldType.UNKNOWN) {
+            showSuggestionsForField(currentFieldType)
+        } else {
+            suggestionBarUI.hideSuggestionBar()
         }
-
-        // Update tracking for next field change
-        previousFieldType = currentFieldType
     }
 
     fun onFieldChanged() {
-        // This is called during typing - update our tracking AND refresh suggestions
         val newContent = getCurrentFieldContent()
         if (newContent != lastFieldContent) {
             lastFieldContent = newContent
-            Log.d("SuggestionDebug", "Field content updated: '$lastFieldContent'")
+            Log.d("AutofillFlow", "Content changed: '$lastFieldContent'")
 
-            // NEW: Update suggestions based on current typing
+            // Update suggestions for typing
             if (currentFieldType != FormDataManager.FieldType.UNKNOWN) {
                 showSuggestionsForField(currentFieldType)
             }
@@ -101,74 +80,45 @@ class AutofillManager(
     }
 
     fun onKeyboardHidden() {
-        Log.d("SuggestionDebug", "=== onKeyboardHidden called ===")
-        // User finished input session - save current field
-        saveCurrentField()
+        Log.d("AutofillFlow", "=== Keyboard Hidden ===")
+        saveCurrentFieldContent()
     }
 
     // ============================================
     // Field Completion Detection
 
-    private fun savePreviousFieldIfCompleted() {
-        val contentToSave = lastFieldContent.trim()
+    private fun saveCurrentFieldContent() {
+        val content = lastFieldContent.trim()
 
-        Log.d("SuggestionDebug", "=== savePreviousFieldIfCompleted ===")
-        Log.d("SuggestionDebug", "Previous field type: $previousFieldType")
-        Log.d("SuggestionDebug", "Content to save: '$contentToSave'")
+        Log.d("AutofillFlow", "Saving field: $currentFieldType = '$content'")
 
-        if (previousFieldType != FormDataManager.FieldType.UNKNOWN &&
-            contentToSave.isNotBlank() &&
-            contentToSave.length >= 2) { // Minimum 2 characters
-
-            Log.d("SuggestionDebug", "✓ Saving completed field - type: $previousFieldType, content: '$contentToSave'")
-            formDataManager.learnFromInput(previousFieldType, contentToSave)
-        } else {
-            Log.d("SuggestionDebug", "✗ Not saving field - invalid conditions")
-        }
-
-        // Update tracking
-        previousFieldType = currentFieldType
-    }
-
-    private fun saveCurrentField() {
-        val contentToSave = getCurrentFieldContent().trim()
-
-        Log.d("SuggestionDebug", "=== saveCurrentField ===")
-        Log.d("SuggestionDebug", "Current field type: $currentFieldType")
-        Log.d("SuggestionDebug", "Content to save: '$contentToSave'")
-
-        if (currentFieldType != FormDataManager.FieldType.UNKNOWN &&
-            contentToSave.isNotBlank() &&
-            contentToSave.length >= 2) {
-
-            Log.d("SuggestionDebug", "✓ Saving current field - type: $currentFieldType, content: '$contentToSave'")
-            formDataManager.learnFromInput(currentFieldType, contentToSave)
-        } else {
-            Log.d("SuggestionDebug", "✗ Not saving current field - invalid conditions")
+        if (currentFieldType != FormDataManager.FieldType.UNKNOWN && content.isNotBlank()) {
+            formDataManager.learnFromInput(currentFieldType, content)
+            Log.d("AutofillFlow", "✓ Field content saved")
         }
     }
 
     private fun generateFieldHash(editorInfo: EditorInfo?): String {
         if (editorInfo == null) return ""
 
-        // Create a more comprehensive hash to uniquely identify fields
+        // Simple field identification
         val packageName = editorInfo.packageName ?: "unknown"
         val fieldId = editorInfo.fieldId
         val inputType = editorInfo.inputType
-        val hintText = editorInfo.hintText?.toString() ?: ""
 
-        val hash = "${packageName}_${fieldId}_${inputType}_${hintText.hashCode()}"
-        Log.d("SuggestionDebug", "Generated field hash: $hash")
-        return hash
+        return "${packageName}_${fieldId}_${inputType}"
     }
 
     private fun handleSuggestionSelected(suggestion: String) {
-        Log.d("SuggestionDebug", "=== SUGGESTION SELECTED CALLBACK ===")
-        Log.d("SuggestionDebug", "Field: $currentFieldType, Suggestion: '$suggestion'")
+        Log.d("AutofillFlow", "=== Suggestion Selected: '$suggestion' ===")
 
+        // Update tracking
+        lastFieldContent = suggestion
+
+        // Confirm with data manager
         formDataManager.confirmSuggestion(currentFieldType, suggestion)
 
-        Log.d("SuggestionDebug", "Suggestion confirmed for ranking")
+        Log.d("AutofillFlow", "✓ Suggestion confirmed")
     }
 
     // ============================================
