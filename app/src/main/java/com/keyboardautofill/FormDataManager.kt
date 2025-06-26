@@ -86,7 +86,7 @@ class FormDataManager(context: Context) {
     fun learnFromInput(fieldType: FieldType, value: String) {
         val cleanValue = value.trim()
         Log.d("SuggestionDebug", "=== LEARN FROM INPUT ===")
-        Log.d("SuggestionDebug", "Field: $fieldType, Manual entry: '$cleanValue'")
+        Log.d("SuggestionDebug", "Field: $fieldType, Value: '$cleanValue'")
 
         if (cleanValue.isBlank() || cleanValue.length < 2) {
             Log.d("SuggestionDebug", "Input too short - skipping")
@@ -100,14 +100,15 @@ class FormDataManager(context: Context) {
             existing.useCount++
             existing.lastUsed = System.currentTimeMillis()
             storeMetadata(key, existing)
-            Log.d("SuggestionDebug", "✅ Updated uses: useCount=${existing.useCount}")
+            Log.d("SuggestionDebug", "✅ Updated: useCount=${existing.useCount}, clickCount=${existing.clickCount}")
         } else {
             val newNode = SuggestionNode(cleanValue, clickCount = 0, useCount = 1)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ New manual entry: useCount=1")
+            Log.d("SuggestionDebug", "✅ New entry: useCount=1, clickCount=0")
         }
 
+        // Clear cache once at end instead of in addToFieldList
         clearCacheForFieldType(fieldType)
     }
 
@@ -282,37 +283,30 @@ class FormDataManager(context: Context) {
         val listKey = fieldType.name
         val existing = prefs.getStringSet(listKey, mutableSetOf())?.toMutableSet() ?: mutableSetOf()
 
-        // Remove duplicates (case-insensitive) - always allow the new entry
+        // Remove case-insensitive duplicates
         existing.removeAll { it.lowercase() == value.lowercase() }
         existing.add(value)
 
-        // Apply age decay to all entries before eviction check
-        applyAgeDecay(fieldType)
-
-        // If we exceed storage limit, evict the lowest scoring entry
+        // Only apply decay and eviction if we're at capacity
         if (existing.size > MAX_STORED_PER_FIELD) {
+            applyAgeDecay(fieldType)
+
             val lowestScoringEntry = findLowestScoringEntry(fieldType, existing)
             if (lowestScoringEntry != null) {
                 existing.remove(lowestScoringEntry)
                 removeMetadata(fieldType, lowestScoringEntry)
-
-                // NEW: Remove from trie
-                val trie = fieldTries[fieldType]
-                val keyToRemove = generateStorageKey(fieldType, lowestScoringEntry)
-                trie?.remove(lowestScoringEntry, keyToRemove)
-
-                Log.d("SuggestionDebug", "Evicted lowest scoring entry: '$lowestScoringEntry'")
+                Log.d("SuggestionDebug", "Evicted: '$lowestScoringEntry'")
             }
         }
 
         prefs.edit().putStringSet(listKey, existing).apply()
 
-        // NEW: Add to trie
+        // Add to trie
         val trie = fieldTries[fieldType]
         val storageKey = generateStorageKey(fieldType, value)
         trie?.insert(value, storageKey)
 
-        Log.d("SuggestionDebug", "Stored '$value' in $fieldType. Total entries: ${existing.size}")
+        Log.d("SuggestionDebug", "Stored '$value' in $fieldType. Total: ${existing.size}")
     }
 
     private fun removeMetadata(fieldType: FieldType, value: String) {
@@ -385,11 +379,12 @@ class FormDataManager(context: Context) {
             cacheAccessOrder.remove(key)
         }
 
-        // NEW: Compress trie to reclaim memory
-        val trie = fieldTries[fieldType]
-        trie?.compress()
-
-        Log.d("SuggestionDebug", "Cleared cache entries for $fieldType and compressed trie")
+        // Only compress trie if significant changes occurred
+        if (keysToRemove.isNotEmpty()) {
+            val trie = fieldTries[fieldType]
+            trie?.compress()
+            Log.d("SuggestionDebug", "Cleared ${keysToRemove.size} cache entries for $fieldType")
+        }
     }
 
     // ============================================

@@ -64,28 +64,35 @@ class SuggestionBarUI(
     // User Interaction
 
     private fun onSuggestionClicked(suggestion: String) {
-        Log.d("SuggestionDebug", "=== SUGGESTION UI CLICK ===")
-        Log.d("SuggestionDebug", "User clicked: '$suggestion'")
+        Log.d("SuggestionDebug", "=== SUGGESTION CLICKED ===")
+        Log.d("SuggestionDebug", "Selected: '$suggestion'")
 
         val inputConnection: InputConnection? = inputMethodService.currentInputConnection
         inputConnection?.let { ic ->
             ic.beginBatchEdit()
 
-            val textBefore = ic.getTextBeforeCursor(1000, 0) ?: ""
-            val textAfter = ic.getTextAfterCursor(1000, 0) ?: ""
+            try {
+                // Clear entire field content and replace with suggestion
+                val textBefore = ic.getTextBeforeCursor(1000, 0) ?: ""
+                val textAfter = ic.getTextAfterCursor(1000, 0) ?: ""
 
-            Log.d("SuggestionDebug", "Replacing field content with suggestion")
-            ic.deleteSurroundingText(textBefore.length, textAfter.length)
-            ic.commitText(suggestion, 1)
-            ic.endBatchEdit()
+                if (textBefore.isNotEmpty() || textAfter.isNotEmpty()) {
+                    ic.deleteSurroundingText(textBefore.length, textAfter.length)
+                }
+
+                ic.commitText(suggestion, 1)
+                Log.d("SuggestionDebug", "✅ Replaced field content with: '$suggestion'")
+
+            } catch (e: Exception) {
+                Log.e("SuggestionDebug", "Error applying suggestion", e)
+            } finally {
+                ic.endBatchEdit()
+            }
 
             hideSuggestionBar()
-
-            Log.d("SuggestionDebug", "Applied suggestion to field: '$suggestion'")
         }
 
-        // CRITICAL: Report the selection for ranking
-        Log.d("SuggestionDebug", "Calling onSuggestionSelected callback")
+        // Report selection for ranking
         onSuggestionSelected?.invoke(suggestion)
         Log.d("SuggestionDebug", "=== SUGGESTION CLICK COMPLETE ===")
     }
