@@ -38,13 +38,13 @@ class FormDataManager(context: Context) {
     data class SuggestionNode(
         val value: String,
         var clickCount: Int = 0,
-        var typeCount: Int = 1,
+        var useCount: Int = 1,
         var lastUsed: Long = System.currentTimeMillis()
     ) {
         fun getRankingScore(): Float {
             // Base scoring remains the same
             val confirmationBonus = clickCount * 0.4f
-            val frequencyScore = typeCount * 0.35f
+            val frequencyScore = useCount * 0.35f
             val recencyScore = calculateRecency() * 0.25f
 
             val totalScore = confirmationBonus + frequencyScore + recencyScore
@@ -97,15 +97,15 @@ class FormDataManager(context: Context) {
         val existing = getMetadata(key)
 
         if (existing != null) {
-            existing.typeCount++
+            existing.useCount++
             existing.lastUsed = System.currentTimeMillis()
             storeMetadata(key, existing)
-            Log.d("SuggestionDebug", "✅ Updated uses: typeCount=${existing.typeCount}")
+            Log.d("SuggestionDebug", "✅ Updated uses: useCount=${existing.useCount}")
         } else {
-            val newNode = SuggestionNode(cleanValue, clickCount = 0, typeCount = 1)
+            val newNode = SuggestionNode(cleanValue, clickCount = 0, useCount = 1)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ New manual entry: typeCount=1")
+            Log.d("SuggestionDebug", "✅ New manual entry: useCount=1")
         }
 
         clearCacheForFieldType(fieldType)
@@ -131,12 +131,12 @@ class FormDataManager(context: Context) {
             existing.clickCount++
             existing.lastUsed = System.currentTimeMillis()
             storeMetadata(key, existing)
-            Log.d("SuggestionDebug", "✅ UPDATED: clickCount ${oldClickCount} → ${existing.clickCount}, typeCount=${existing.typeCount}")
+            Log.d("SuggestionDebug", "✅ UPDATED: clickCount ${oldClickCount} → ${existing.clickCount}, useCount=${existing.useCount}")
         } else {
-            val newNode = SuggestionNode(cleanValue, clickCount = 1, typeCount = 0)
+            val newNode = SuggestionNode(cleanValue, clickCount = 1, useCount = 0)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ NEW ENTRY: clickCount=1, typeCount=0")
+            Log.d("SuggestionDebug", "✅ NEW ENTRY: clickCount=1, useCount=0")
         }
 
         clearCacheForFieldType(fieldType)
@@ -176,7 +176,7 @@ class FormDataManager(context: Context) {
             val metadata = getMetadata(key)
             if (metadata != null) {
                 val score = metadata.getRankingScore()
-                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': clicks=${metadata.clickCount}, types=${metadata.typeCount}, score=$score")
+                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': clicks=${metadata.clickCount}, types=${metadata.useCount}, score=$score")
                 RankedSuggestion(metadata.value, score)
             } else {
                 Log.w("SuggestionDebug", "No metadata found for key: $key")
@@ -252,16 +252,16 @@ class FormDataManager(context: Context) {
                     SuggestionNode(
                         value = parts[0],
                         clickCount = 0,
-                        typeCount = parts[1].toInt(),
+                        useCount = parts[1].toInt(),
                         lastUsed = parts[2].toLong()
                     )
                 }
                 4 -> {
-                    // New format: value|clickCount|typeCount|lastUsed
+                    // New format: value|clickCount|useCount|lastUsed
                     SuggestionNode(
                         value = parts[0],
                         clickCount = parts[1].toInt(),
-                        typeCount = parts[2].toInt(),
+                        useCount = parts[2].toInt(),
                         lastUsed = parts[3].toLong()
                     )
                 }
@@ -274,7 +274,7 @@ class FormDataManager(context: Context) {
     }
 
     private fun storeMetadata(key: String, node: SuggestionNode) {
-        val serialized = "${node.value}|${node.clickCount}|${node.typeCount}|${node.lastUsed}"
+        val serialized = "${node.value}|${node.clickCount}|${node.useCount}|${node.lastUsed}"
         metadataPrefs.edit().putString(key, serialized).apply()
     }
 
@@ -337,10 +337,10 @@ class FormDataManager(context: Context) {
 
                 // Apply decay if entry is old and hasn't been decayed recently
                 if (daysSinceLastUsed >= DECAY_INTERVAL_DAYS) {
-                    metadata.typeCount = (metadata.typeCount * DECAY_FACTOR).toInt().coerceAtLeast(1)
+                    metadata.useCount = (metadata.useCount * DECAY_FACTOR).toInt().coerceAtLeast(1)
                     metadata.clickCount = (metadata.clickCount * DECAY_FACTOR).toInt()
                     storeMetadata(key, metadata)
-                    Log.d("SuggestionDebug", "Applied age decay to '$suggestion': types=${metadata.typeCount}, clicks=${metadata.clickCount}")
+                    Log.d("SuggestionDebug", "Applied age decay to '$suggestion': types=${metadata.useCount}, clicks=${metadata.clickCount}")
                 }
             }
         }
