@@ -29,6 +29,8 @@ class AutofillManager(
     private var lastFieldContent = ""
     private var currentFieldHash = ""
     private var lastProcessedFieldHash = ""
+    private var fieldContentAtFocus = ""
+    private var fieldContentCache = mutableMapOf<String, String>()
 
     // ============================================
     // Main Integration Points
@@ -70,6 +72,9 @@ class AutofillManager(
 
         // Get current field content immediately
         lastFieldContent = getCurrentFieldContent()
+        fieldContentAtFocus = lastFieldContent
+        fieldContentCache[currentFieldHash] = lastFieldContent
+        Log.d("SuggestionDebug", "Cached initial content for field: '$lastFieldContent'")
         Log.d("SuggestionDebug", "Current field content on focus: '$lastFieldContent'")
 
         when (currentFieldType) {
@@ -87,13 +92,18 @@ class AutofillManager(
     }
 
     fun onFieldChanged() {
-        // This is called during typing - update our tracking AND refresh suggestions
         val newContent = getCurrentFieldContent()
         if (newContent != lastFieldContent) {
             lastFieldContent = newContent
-            Log.d("SuggestionDebug", "Field content updated: '$lastFieldContent'")
 
-            // NEW: Update suggestions based on current typing
+            // Update cache with latest content
+            if (currentFieldHash.isNotEmpty()) {
+                fieldContentCache[currentFieldHash] = newContent
+            }
+
+            Log.d("SuggestionDebug", "Field content updated and cached: '$lastFieldContent'")
+
+            // Update suggestions based on current typing
             if (currentFieldType != FormDataManager.FieldType.UNKNOWN) {
                 showSuggestionsForField(currentFieldType)
             }
@@ -110,7 +120,16 @@ class AutofillManager(
     // Field Completion Detection
 
     private fun savePreviousFieldIfCompleted() {
-        val contentToSave = lastFieldContent.trim()
+        // Get content from cache first, then fallback to lastFieldContent
+        var contentToSave = ""
+
+        if (lastProcessedFieldHash.isNotEmpty()) {
+            contentToSave = fieldContentCache[lastProcessedFieldHash]?.trim() ?: ""
+        }
+
+        if (contentToSave.isBlank()) {
+            contentToSave = lastFieldContent.trim()
+        }
 
         Log.d("SuggestionDebug", "=== savePreviousFieldIfCompleted ===")
         Log.d("SuggestionDebug", "Previous field type: $previousFieldType")
@@ -118,10 +137,13 @@ class AutofillManager(
 
         if (previousFieldType != FormDataManager.FieldType.UNKNOWN &&
             contentToSave.isNotBlank() &&
-            contentToSave.length >= 2) { // Minimum 2 characters
+            contentToSave.length >= 2) {
 
             Log.d("SuggestionDebug", "✓ Saving completed field - type: $previousFieldType, content: '$contentToSave'")
             formDataManager.learnFromInput(previousFieldType, contentToSave)
+
+            // Clear cache for processed field
+            fieldContentCache.remove(lastProcessedFieldHash)
         } else {
             Log.d("SuggestionDebug", "✗ Not saving field - invalid conditions")
         }
@@ -131,7 +153,20 @@ class AutofillManager(
     }
 
     private fun saveCurrentField() {
-        val contentToSave = getCurrentFieldContent().trim()
+        // Try multiple methods to get content, with fallbacks
+        var contentToSave = getCurrentFieldContent().trim()
+
+        // Fallback 1: Use cached content if current retrieval fails
+        if (contentToSave.isBlank() && currentFieldHash.isNotEmpty()) {
+            contentToSave = fieldContentCache[currentFieldHash]?.trim() ?: ""
+            Log.d("SuggestionDebug", "Using cached content: '$contentToSave'")
+        }
+
+        // Fallback 2: Use last known field content
+        if (contentToSave.isBlank()) {
+            contentToSave = lastFieldContent.trim()
+            Log.d("SuggestionDebug", "Using lastFieldContent: '$contentToSave'")
+        }
 
         Log.d("SuggestionDebug", "=== saveCurrentField ===")
         Log.d("SuggestionDebug", "Current field type: $currentFieldType")
@@ -143,6 +178,9 @@ class AutofillManager(
 
             Log.d("SuggestionDebug", "✓ Saving current field - type: $currentFieldType, content: '$contentToSave'")
             formDataManager.learnFromInput(currentFieldType, contentToSave)
+
+            // Clear cache for this field after successful save
+            fieldContentCache.remove(currentFieldHash)
         } else {
             Log.d("SuggestionDebug", "✗ Not saving current field - invalid conditions")
         }
@@ -179,15 +217,18 @@ class AutofillManager(
 
         try {
             // Get text before and after cursor to reconstruct full field content
-            val textBefore = ic.getTextBeforeCursor(1000, 0) ?: ""
-            val textAfter = ic.getTextAfterCursor(1000, 0) ?: ""
-            val fullText = textBefore.toString() + textAfter.toString()
+            val textBefore = ic.getTextBeforeCursor(5000, 0) ?: ""
+            val selectedText = ic.getSelectedText(0) ?: ""
+            val textAfter = ic.getTextAfterCursor(5000, 0) ?: ""
+            val fullText = textBefore.toString() + selectedText.toString() + textAfter.toString()
 
-            Log.d("SuggestionDebug", "Getting field content - before: '$textBefore', after: '$textAfter', full: '$fullText'")
-            return fullText
+            Log.d("SuggestionDebug", "Field content - before: '$textBefore', selected: '$selectedText', after: '$textAfter'")
+            Log.d("SuggestionDebug", "Full reconstructed content: '$fullText'")
+
+            return fullText.trim()
         } catch (e: Exception) {
             Log.e("SuggestionDebug", "Error getting field content", e)
-            return ""
+            return lastFieldContent
         }
     }
 
