@@ -44,22 +44,22 @@ class AutofillManager(
         val newFieldHash = generateFieldHash(editorInfo)
         val detectedFieldType = formDataManager.detectFieldType(editorInfo)
 
-        // Skip if same field AND same type (prevents duplicate processing)
+        // Skip if same field AND same type
         if (newFieldHash == lastProcessedFieldHash && detectedFieldType == currentFieldType) {
             Log.d("SuggestionDebug", "Same field and type - skipping")
             return
         }
 
-        // Save previous field only if we have meaningful data
+        // FIXED: Save previous field BEFORE updating tracking variables
         if (lastProcessedFieldHash.isNotEmpty() &&
-            previousFieldType != FormDataManager.FieldType.UNKNOWN &&
+            currentFieldType != FormDataManager.FieldType.UNKNOWN &&
             lastFieldContent.trim().length >= 2) {
 
-            Log.d("SuggestionDebug", "Saving previous field: $previousFieldType = '$lastFieldContent'")
-            formDataManager.learnFromInput(previousFieldType, lastFieldContent.trim())
+            Log.d("SuggestionDebug", "Saving previous field: $currentFieldType = '$lastFieldContent'")
+            formDataManager.learnFromInput(currentFieldType, lastFieldContent.trim())
         }
 
-        // Update tracking
+        // NOW update tracking (after saving with correct field type)
         previousFieldType = currentFieldType
         currentFieldType = detectedFieldType
         currentFieldHash = newFieldHash
@@ -98,27 +98,6 @@ class AutofillManager(
 
     // ============================================
     // Field Completion Detection
-
-    private fun savePreviousFieldIfCompleted() {
-        val contentToSave = lastFieldContent.trim()
-
-        Log.d("SuggestionDebug", "=== savePreviousFieldIfCompleted ===")
-        Log.d("SuggestionDebug", "Previous field type: $previousFieldType")
-        Log.d("SuggestionDebug", "Content to save: '$contentToSave'")
-
-        if (previousFieldType != FormDataManager.FieldType.UNKNOWN &&
-            contentToSave.isNotBlank() &&
-            contentToSave.length >= 2) { // Minimum 2 characters
-
-            Log.d("SuggestionDebug", "✓ Saving completed field - type: $previousFieldType, content: '$contentToSave'")
-            formDataManager.learnFromInput(previousFieldType, contentToSave)
-        } else {
-            Log.d("SuggestionDebug", "✗ Not saving field - invalid conditions")
-        }
-
-        // Update tracking
-        previousFieldType = currentFieldType
-    }
 
     private fun saveCurrentField() {
         val contentToSave = getCurrentFieldContent().trim()

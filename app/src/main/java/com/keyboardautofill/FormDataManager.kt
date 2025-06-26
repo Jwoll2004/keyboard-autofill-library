@@ -19,6 +19,8 @@ class FormDataManager(context: Context) {
     private val hotCache = mutableMapOf<String, List<RankedSuggestion>>()
     private val cacheAccessOrder = mutableListOf<String>()
     private val maxCacheSize = 50
+    private val recentlyUpdatedEntries = mutableSetOf<String>()
+    private var lastRecencyBatchClear = System.currentTimeMillis()
 
     init {
         // Load existing data into tries on startup
@@ -42,18 +44,13 @@ class FormDataManager(context: Context) {
         var lastUsed: Long = System.currentTimeMillis()
     ) {
         fun getRankingScore(): Float {
-            // Base scoring remains the same
             val confirmationBonus = clickCount * 0.4f
             val frequencyScore = useCount * 0.35f
             val recencyScore = calculateRecency() * 0.25f
-
-            val totalScore = confirmationBonus + frequencyScore + recencyScore
-
-            // Minimum viable score for new entries
-            return totalScore.coerceAtLeast(0.1f)
+            return (confirmationBonus + frequencyScore + recencyScore).coerceAtLeast(0.1f)
         }
 
-        private fun calculateRecency(): Float {
+        fun calculateRecency(): Float {
             val currentTime = System.currentTimeMillis()
             val daysSinceUsed = (currentTime - lastUsed) / (1000 * 60 * 60 * 24f)
 
@@ -64,6 +61,14 @@ class FormDataManager(context: Context) {
                 daysSinceUsed <= 90 -> 0.2f     // Used this quarter
                 else -> 0.1f                    // Older usage
             }
+        }
+
+        // Add helper for debugging
+        fun getDetailedScore(): String {
+            val conf = clickCount * 0.4f
+            val freq = useCount * 0.35f
+            val rec = calculateRecency() * 0.25f
+            return "conf=$conf, freq=$freq, rec=$rec, total=${getRankingScore()}"
         }
     }
 
@@ -88,27 +93,30 @@ class FormDataManager(context: Context) {
         Log.d("SuggestionDebug", "=== LEARN FROM INPUT ===")
         Log.d("SuggestionDebug", "Field: $fieldType, Value: '$cleanValue'")
 
-        if (cleanValue.isBlank() || cleanValue.length < 2) {
-            Log.d("SuggestionDebug", "Input too short - skipping")
-            return
-        }
+        if (cleanValue.isBlank() || cleanValue.length < 2) return
 
         val key = generateStorageKey(fieldType, cleanValue)
         val existing = getMetadata(key)
 
         if (existing != null) {
+            val oldScore = existing.getRankingScore()
+            val wasRecent = (System.currentTimeMillis() - existing.lastUsed) < (24 * 60 * 60 * 1000) // 1 day
+
             existing.useCount++
             existing.lastUsed = System.currentTimeMillis()
             storeMetadata(key, existing)
-            Log.d("SuggestionDebug", "✅ Updated: useCount=${existing.useCount}, clickCount=${existing.clickCount}")
+
+            val newScore = existing.getRankingScore()
+            Log.d("SuggestionDebug", "✅ Updated: useCount=${existing.useCount}")
+            Log.d("SuggestionDebug", "Recency: ${if (wasRecent) "was recent" else "got recency boost"}")
+            Log.d("SuggestionDebug", "Score: $oldScore → $newScore")
         } else {
             val newNode = SuggestionNode(cleanValue, clickCount = 0, useCount = 1)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ New entry: useCount=1, clickCount=0")
+            Log.d("SuggestionDebug", "✅ New entry: useCount=1, fresh recency=1.0")
         }
 
-        // Clear cache once at end instead of in addToFieldList
         clearCacheForFieldType(fieldType)
     }
 
@@ -117,31 +125,30 @@ class FormDataManager(context: Context) {
         Log.d("SuggestionDebug", "=== CONFIRM SUGGESTION ===")
         Log.d("SuggestionDebug", "Field: $fieldType, Value: '$cleanValue'")
 
-        if (cleanValue.isBlank()) {
-            Log.d("SuggestionDebug", "Empty value - skipping")
-            return
-        }
+        if (cleanValue.isBlank()) return
 
         val key = generateStorageKey(fieldType, cleanValue)
-        Log.d("SuggestionDebug", "Storage key: $key")
-
         val existing = getMetadata(key)
 
         if (existing != null) {
-            val oldClickCount = existing.clickCount
+            val oldScore = existing.getRankingScore()
             existing.clickCount++
             existing.lastUsed = System.currentTimeMillis()
             storeMetadata(key, existing)
-            Log.d("SuggestionDebug", "✅ UPDATED: clickCount ${oldClickCount} → ${existing.clickCount}, useCount=${existing.useCount}")
+
+            val newScore = existing.getRankingScore()
+            Log.d("SuggestionDebug", "✅ UPDATED: clickCount ${existing.clickCount-1} → ${existing.clickCount}")
+            Log.d("SuggestionDebug", "Score: $oldScore → $newScore (recency boost)")
         } else {
             val newNode = SuggestionNode(cleanValue, clickCount = 1, useCount = 0)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ NEW ENTRY: clickCount=1, useCount=0")
+            Log.d("SuggestionDebug", "✅ NEW ENTRY: clickCount=1, recency=1.0")
         }
 
+        // Mark for recency update batching
+        recentlyUpdatedEntries.add(key)
         clearCacheForFieldType(fieldType)
-        Log.d("SuggestionDebug", "=== CONFIRM COMPLETE ===")
     }
 
     // ============================================
@@ -149,20 +156,24 @@ class FormDataManager(context: Context) {
     fun getSuggestions(fieldType: FieldType, partialInput: String = ""): List<String> {
         val cacheKey = "${fieldType}_${partialInput}"
 
-        // Check cache first
-        val cached = hotCache[cacheKey]
+        // Clear old recency batch periodically
+        val now = System.currentTimeMillis()
+        if (now - lastRecencyBatchClear > 60000) { // 1 minute
+            recentlyUpdatedEntries.clear()
+            lastRecencyBatchClear = now
+        }
+
+        // Skip cache if we have recent updates to this field type
+        val hasRecentUpdates = recentlyUpdatedEntries.any { it.startsWith("${fieldType.name}_") }
+
+        val cached = if (!hasRecentUpdates) hotCache[cacheKey] else null
         if (cached != null) {
             updateCacheAccess(cacheKey)
             Log.d("SuggestionDebug", "Cache hit for $cacheKey")
             return cached.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS)
         }
 
-        // NEW: Use trie for efficient prefix matching
-        val trie = fieldTries[fieldType]
-        if (trie == null) {
-            Log.w("SuggestionDebug", "No trie found for $fieldType")
-            return emptyList()
-        }
+        val trie = fieldTries[fieldType] ?: return emptyList()
 
         val matchingKeys = if (partialInput.isBlank()) {
             trie.getAllStorageKeys()
@@ -170,26 +181,26 @@ class FormDataManager(context: Context) {
             trie.findMatches(partialInput)
         }
 
-        Log.d("SuggestionDebug", "Trie found ${matchingKeys.size} matches for '$partialInput' in $fieldType")
-
-        // Get metadata and rank suggestions
+        // Get metadata and rank with detailed recency logging
         val rankedSuggestions = matchingKeys.mapNotNull { key ->
             val metadata = getMetadata(key)
             if (metadata != null) {
                 val score = metadata.getRankingScore()
-                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': clicks=${metadata.clickCount}, uses=${metadata.useCount}, score=$score")
+                val recencyScore = metadata.calculateRecency()
+
+                Log.d("SuggestionDebug", "Suggestion '${metadata.value}':")
+                Log.d("SuggestionDebug", "  clicks=${metadata.clickCount}, uses=${metadata.useCount}")
+                Log.d("SuggestionDebug", "  recency=$recencyScore, total_score=$score")
+
                 RankedSuggestion(metadata.value, score)
-            } else {
-                Log.w("SuggestionDebug", "No metadata found for key: $key")
-                null
-            }
+            } else null
         }.sortedByDescending { it.score }
 
-        // Cache the result and return limited display
+        // Cache result
         cacheResult(cacheKey, rankedSuggestions)
 
         val displayList = rankedSuggestions.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS)
-        Log.d("SuggestionDebug", "Displaying top ${displayList.size} of ${rankedSuggestions.size} suggestions for $fieldType")
+        Log.d("SuggestionDebug", "Final ranking order: ${displayList.joinToString()}")
 
         return displayList
     }
