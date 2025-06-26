@@ -176,7 +176,7 @@ class FormDataManager(context: Context) {
             val metadata = getMetadata(key)
             if (metadata != null) {
                 val score = metadata.getRankingScore()
-                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': clicks=${metadata.clickCount}, types=${metadata.useCount}, score=$score")
+                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': clicks=${metadata.clickCount}, uses=${metadata.useCount}, score=$score")
                 RankedSuggestion(metadata.value, score)
             } else {
                 Log.w("SuggestionDebug", "No metadata found for key: $key")
@@ -340,7 +340,7 @@ class FormDataManager(context: Context) {
                     metadata.useCount = (metadata.useCount * DECAY_FACTOR).toInt().coerceAtLeast(1)
                     metadata.clickCount = (metadata.clickCount * DECAY_FACTOR).toInt()
                     storeMetadata(key, metadata)
-                    Log.d("SuggestionDebug", "Applied age decay to '$suggestion': types=${metadata.useCount}, clicks=${metadata.clickCount}")
+                    Log.d("SuggestionDebug", "Applied age decay to '$suggestion': uses=${metadata.useCount}, clicks=${metadata.clickCount}")
                 }
             }
         }
