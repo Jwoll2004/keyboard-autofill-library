@@ -19,8 +19,6 @@ class FormDataManager(context: Context) {
     private val hotCache = mutableMapOf<String, List<RankedSuggestion>>()
     private val cacheAccessOrder = mutableListOf<String>()
     private val maxCacheSize = 50
-    private val recentlyUpdatedEntries = mutableSetOf<String>()
-    private var lastRecencyBatchClear = System.currentTimeMillis()
 
     init {
         // Load existing data into tries on startup
@@ -118,6 +116,7 @@ class FormDataManager(context: Context) {
         }
 
         clearCacheForFieldType(fieldType)
+        logCacheState("after_learn_${fieldType}")
     }
 
     fun confirmSuggestion(fieldType: FieldType, value: String) {
@@ -146,9 +145,8 @@ class FormDataManager(context: Context) {
             Log.d("SuggestionDebug", "✅ NEW ENTRY: clickCount=1, recency=1.0")
         }
 
-        // Mark for recency update batching
-        recentlyUpdatedEntries.add(key)
         clearCacheForFieldType(fieldType)
+        logCacheState("after_confirm_${fieldType}")
     }
 
     // ============================================
@@ -156,22 +154,13 @@ class FormDataManager(context: Context) {
     fun getSuggestions(fieldType: FieldType, partialInput: String = ""): List<String> {
         val cacheKey = "${fieldType}_${partialInput}"
 
-        // Clear old recency batch periodically
-        val now = System.currentTimeMillis()
-        if (now - lastRecencyBatchClear > 60000) { // 1 minute
-            recentlyUpdatedEntries.clear()
-            lastRecencyBatchClear = now
-        }
-
-        // Skip cache if we have recent updates to this field type
-        val hasRecentUpdates = recentlyUpdatedEntries.any { it.startsWith("${fieldType.name}_") }
-
-        val cached = if (!hasRecentUpdates) hotCache[cacheKey] else null
+        val cached = hotCache[cacheKey]
         if (cached != null) {
             updateCacheAccess(cacheKey)
-            Log.d("SuggestionDebug", "Cache hit for $cacheKey")
+            Log.d("CacheDebug", "✅ CACHE HIT: key='$cacheKey'")
             return cached.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS)
         }
+        Log.d("CacheDebug", "❌ CACHE MISS: key='$cacheKey', reason= not_found")
 
         val trie = fieldTries[fieldType] ?: return emptyList()
 
@@ -368,34 +357,63 @@ class FormDataManager(context: Context) {
     // Cache Management
 
     private fun cacheResult(key: String, result: List<RankedSuggestion>) {
+        Log.d("CacheDebug", "=== CACHE STORE ===")
+        Log.d("CacheDebug", "Storing key='$key', results=${result.size}, current_cache_size=${hotCache.size}/$maxCacheSize")
+
         if (hotCache.size >= maxCacheSize) {
-            // Remove oldest cache entry
             val oldestKey = cacheAccessOrder.removeFirstOrNull()
-            oldestKey?.let { hotCache.remove(it) }
+            oldestKey?.let {
+                hotCache.remove(it)
+                Log.d("CacheDebug", "🗑️ EVICTED oldest: '$it' (cache was full)")
+            }
         }
 
         hotCache[key] = result
         cacheAccessOrder.add(key)
+
+        Log.d("CacheDebug", "✅ STORED: cache_size=${hotCache.size}, access_order_size=${cacheAccessOrder.size}")
+        Log.d("CacheDebug", "Recent access order: ${cacheAccessOrder.takeLast(3)}")
     }
 
     private fun updateCacheAccess(key: String) {
-        cacheAccessOrder.remove(key)
+        val wasPresent = cacheAccessOrder.remove(key)
         cacheAccessOrder.add(key)
+
+        Log.d("CacheDebug", "♻️ ACCESS UPDATE: key='$key', was_present=$wasPresent")
+        Log.d("CacheDebug", "New access order (last 3): ${cacheAccessOrder.takeLast(3)}")
     }
 
     private fun clearCacheForFieldType(fieldType: FieldType) {
+        Log.d("CacheDebug", "=== CACHE CLEAR ===")
+        Log.d("CacheDebug", "Clearing cache for fieldType: $fieldType")
+        Log.d("CacheDebug", "Before clear: cache_size=${hotCache.size}, access_order_size=${cacheAccessOrder.size}")
+
         val keysToRemove = hotCache.keys.filter { it.startsWith("${fieldType}_") }
+        Log.d("CacheDebug", "Keys to remove: $keysToRemove")
+
         keysToRemove.forEach { key ->
             hotCache.remove(key)
             cacheAccessOrder.remove(key)
         }
 
+        Log.d("CacheDebug", "After clear: cache_size=${hotCache.size}, access_order_size=${cacheAccessOrder.size}")
+        Log.d("CacheDebug", "Remaining keys: ${hotCache.keys}")
+
         // Only compress trie if significant changes occurred
         if (keysToRemove.isNotEmpty()) {
             val trie = fieldTries[fieldType]
             trie?.compress()
-            Log.d("SuggestionDebug", "Cleared ${keysToRemove.size} cache entries for $fieldType")
+            Log.d("CacheDebug", "✅ Cleared ${keysToRemove.size} cache entries for $fieldType + compressed trie")
         }
+    }
+
+    // Helper method for debugging cache state
+    private fun logCacheState(context: String) {
+        Log.d("CacheDebug", "=== CACHE STATE: $context ===")
+        Log.d("CacheDebug", "Cache size: ${hotCache.size}/$maxCacheSize")
+        Log.d("CacheDebug", "Access order size: ${cacheAccessOrder.size}")
+        Log.d("CacheDebug", "Cache keys: ${hotCache.keys}")
+        Log.d("CacheDebug", "Access order: $cacheAccessOrder")
     }
 
     // ============================================
