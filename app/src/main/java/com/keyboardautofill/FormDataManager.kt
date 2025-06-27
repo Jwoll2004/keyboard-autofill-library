@@ -72,7 +72,8 @@ class FormDataManager(context: Context) {
 
     data class RankedSuggestion(
         val value: String,
-        val score: Float
+        val score: Float,
+        val lastUsed: Long = 0L
     )
 
     enum class FieldType {
@@ -90,6 +91,9 @@ class FormDataManager(context: Context) {
         val cleanValue = value.trim()
         Log.d("SuggestionDebug", "=== LEARN FROM INPUT ===")
         Log.d("SuggestionDebug", "Field: $fieldType, Value: '$cleanValue'")
+
+        val currentCount = getFieldSuggestions(fieldType).size
+        Log.d("EdgeDebug", "Field $fieldType: current_entries=$currentCount, max_allowed=$MAX_STORED_PER_FIELD")
 
         if (cleanValue.isBlank() || cleanValue.length < 2) return
 
@@ -117,6 +121,8 @@ class FormDataManager(context: Context) {
 
         clearCacheForFieldType(fieldType)
         logCacheState("after_learn_${fieldType}")
+        val finalCount = getFieldSuggestions(fieldType).size
+        Log.d("EdgeDebug", "Field $fieldType: final_entries=$finalCount after learning '$cleanValue'")
     }
 
     fun confirmSuggestion(fieldType: FieldType, value: String) {
@@ -170,20 +176,17 @@ class FormDataManager(context: Context) {
             trie.findMatches(partialInput)
         }
 
-        // Get metadata and rank with detailed recency logging
+        // Get metadata and rank
         val rankedSuggestions = matchingKeys.mapNotNull { key ->
             val metadata = getMetadata(key)
             if (metadata != null) {
                 val score = metadata.getRankingScore()
-                val recencyScore = metadata.calculateRecency()
-
-                Log.d("SuggestionDebug", "Suggestion '${metadata.value}':")
-                Log.d("SuggestionDebug", "  clicks=${metadata.clickCount}, uses=${metadata.useCount}")
-                Log.d("SuggestionDebug", "  recency=$recencyScore, total_score=$score")
-
-                RankedSuggestion(metadata.value, score)
+                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': score=$score, lastUsed=${metadata.lastUsed}")
+                RankedSuggestion(metadata.value, score, metadata.lastUsed) // Add timestamp
             } else null
-        }.sortedByDescending { it.score }
+        }.sortedWith(compareByDescending<RankedSuggestion> { it.score }
+            .thenByDescending { it.lastUsed } // Newer entries first when scores tied
+            .thenBy { it.value }) // Alphabetical as final tiebreaker
 
         // Cache result
         cacheResult(cacheKey, rankedSuggestions)
@@ -279,6 +282,22 @@ class FormDataManager(context: Context) {
         metadataPrefs.edit().putString(key, serialized).apply()
     }
 
+    // Add this new method to FormDataManager class:
+    private fun logDetailedScoring(fieldType: FieldType, entries: Set<String>, context: String) {
+        Log.d("EdgeDebug", "=== DETAILED SCORING: $context ===")
+        val scoredEntries = entries.map { suggestion ->
+            val key = generateStorageKey(fieldType, suggestion)
+            val metadata = getMetadata(key)
+            val score = metadata?.getRankingScore() ?: 0f
+            Triple(suggestion, score, metadata?.getDetailedScore() ?: "no_metadata")
+        }.sortedByDescending { it.second }
+
+        scoredEntries.forEachIndexed { index, (suggestion, score, details) ->
+            Log.d("EdgeDebug", "[$index] '$suggestion': score=$score ($details)")
+        }
+        Log.d("EdgeDebug", "Lowest scoring: '${scoredEntries.lastOrNull()?.first}' (${scoredEntries.lastOrNull()?.second})")
+    }
+
     private fun addToFieldList(fieldType: FieldType, value: String) {
         val listKey = fieldType.name
         val existing = prefs.getStringSet(listKey, mutableSetOf())?.toMutableSet() ?: mutableSetOf()
@@ -289,13 +308,23 @@ class FormDataManager(context: Context) {
 
         // Only apply decay and eviction if we're at capacity
         if (existing.size > MAX_STORED_PER_FIELD) {
-            applyAgeDecay(fieldType)
 
-            val lowestScoringEntry = findLowestScoringEntry(fieldType, existing)
+            applyAgeDecay(fieldType)
+            Log.d("EdgeDebug", "Age decay applied to all entries")
+
+            // Get scoring BEFORE adding new entry
+            logDetailedScoring(fieldType, existing.filter { it != value }.toSet(), "before_eviction")
+
+            val lowestScoringEntry = findLowestScoringEntry(fieldType, existing.filter { it != value }.toSet())
             if (lowestScoringEntry != null) {
+                val evictedKey = generateStorageKey(fieldType, lowestScoringEntry)
+                val evictedMetadata = getMetadata(evictedKey)
+                Log.d("EdgeDebug", "🗑️ EVICTED: '$lowestScoringEntry' (score=${evictedMetadata?.getRankingScore()}, lastUsed=${evictedMetadata?.lastUsed})")
+
                 existing.remove(lowestScoringEntry)
                 removeMetadata(fieldType, lowestScoringEntry)
-                Log.d("SuggestionDebug", "Evicted: '$lowestScoringEntry'")
+                Log.d("EdgeDebug", "Final count: ${existing.size} entries")
+                Log.d("EdgeDebug", "=== EVICTION PROCESS COMPLETE ===")
             }
         }
 
@@ -306,7 +335,14 @@ class FormDataManager(context: Context) {
         val storageKey = generateStorageKey(fieldType, value)
         trie?.insert(value, storageKey)
 
-        Log.d("SuggestionDebug", "Stored '$value' in $fieldType. Total: ${existing.size}")
+        // Replace the log at end of method:
+        Log.d("EdgeDebug", "=== FIELD STORAGE UPDATE ===")
+        Log.d("EdgeDebug", "Field: $fieldType, added: '$value'")
+        Log.d("EdgeDebug", "Before: ${existing.size - 1} entries, After: ${existing.size} entries")
+        Log.d("EdgeDebug", "Capacity check: ${existing.size}/$MAX_STORED_PER_FIELD")
+        if (existing.size > MAX_STORED_PER_FIELD) {
+            Log.d("EdgeDebug", "⚠️ OVER CAPACITY - eviction will be triggered")
+        }
     }
 
     private fun removeMetadata(fieldType: FieldType, value: String) {
@@ -321,6 +357,8 @@ class FormDataManager(context: Context) {
     private fun applyAgeDecay(fieldType: FieldType) {
         val allSuggestions = getFieldSuggestions(fieldType)
         val currentTime = System.currentTimeMillis()
+        Log.d("EdgeDebug", "=== AGE DECAY ANALYSIS ===")
+        Log.d("EdgeDebug", "Field: $fieldType, checking ${allSuggestions.size} entries")
 
         allSuggestions.forEach { suggestion ->
             val key = generateStorageKey(fieldType, suggestion)
@@ -331,21 +369,30 @@ class FormDataManager(context: Context) {
 
                 // Apply decay if entry is old and hasn't been decayed recently
                 if (daysSinceLastUsed >= DECAY_INTERVAL_DAYS) {
+                    val oldUseCount = metadata.useCount
+                    val oldClickCount = metadata.clickCount
                     metadata.useCount = (metadata.useCount * DECAY_FACTOR).toInt().coerceAtLeast(1)
                     metadata.clickCount = (metadata.clickCount * DECAY_FACTOR).toInt()
                     storeMetadata(key, metadata)
-                    Log.d("SuggestionDebug", "Applied age decay to '$suggestion': uses=${metadata.useCount}, clicks=${metadata.clickCount}")
+                    Log.d("EdgeDebug", "⏳ AGED: '$suggestion' - uses: $oldUseCount→${metadata.useCount}, clicks: $oldClickCount→${metadata.clickCount}")
+                } else {
+                    Log.d("EdgeDebug", "✅ FRESH: '$suggestion' (${daysSinceLastUsed.toInt()} days old)")
                 }
             }
         }
     }
 
     private fun findLowestScoringEntry(fieldType: FieldType, entries: Set<String>): String? {
-        return entries.minByOrNull { suggestion ->
+        return entries.minWithOrNull(compareBy<String> { suggestion ->
             val key = generateStorageKey(fieldType, suggestion)
             val metadata = getMetadata(key)
             metadata?.getRankingScore() ?: 0f
-        }
+        }.thenBy { suggestion ->
+            // Evict oldest entry for tie break
+            val key = generateStorageKey(fieldType, suggestion)
+            val metadata = getMetadata(key)
+            metadata?.lastUsed ?: 0L
+        }.thenBy { it }) // Alphabetical  final fallback
     }
 
     private fun getFieldSuggestions(fieldType: FieldType): List<String> {
