@@ -30,6 +30,18 @@ class FormDataManager(context: Context) {
         private const val MAX_DISPLAYED_SUGGESTIONS = 8
         private const val DECAY_INTERVAL_DAYS = 30
         private const val DECAY_FACTOR = 0.9f
+        
+        // Text length validation constants
+        private const val MAX_NAME_LENGTH = 50
+        private const val MAX_EMAIL_LENGTH = 254
+        private const val MAX_PHONE_LENGTH = 20
+        private const val MAX_ADDRESS_LENGTH = 200
+        private const val MAX_CITY_LENGTH = 50
+        private const val MAX_STATE_LENGTH = 30
+        private const val MAX_ZIP_LENGTH = 10
+        private const val MAX_COMPANY_LENGTH = 100
+        private const val MAX_USERNAME_LENGTH = 30
+        private const val MIN_INPUT_LENGTH = 2
     }
 
     // ============================================
@@ -95,7 +107,10 @@ class FormDataManager(context: Context) {
         val currentCount = getFieldSuggestions(fieldType).size
         Log.d("EdgeDebug", "Field $fieldType: current_entries=$currentCount, max_allowed=$MAX_STORED_PER_FIELD")
 
-        if (cleanValue.isBlank() || cleanValue.length < 2) return
+        if (!isValidInputLength(fieldType, cleanValue)) {
+            Log.d("SuggestionDebug", "Input validation failed for $fieldType: '$cleanValue'")
+            return
+        }
 
         val key = generateStorageKey(fieldType, cleanValue)
         val existing = getMetadata(key)
@@ -130,7 +145,10 @@ class FormDataManager(context: Context) {
         Log.d("SuggestionDebug", "=== CONFIRM SUGGESTION ===")
         Log.d("SuggestionDebug", "Field: $fieldType, Value: '$cleanValue'")
 
-        if (cleanValue.isBlank()) return
+        if (!isValidInputLength(fieldType, cleanValue)) {
+            Log.d("SuggestionDebug", "Suggestion validation failed for $fieldType: '$cleanValue'")
+            return
+        }
 
         val key = generateStorageKey(fieldType, cleanValue)
         val existing = getMetadata(key)
@@ -482,5 +500,144 @@ class FormDataManager(context: Context) {
 
             Log.d("SuggestionDebug", "Loaded ${suggestions.size} suggestions into $fieldType trie")
         }
+    }
+    // ============================================
+    // Data validations
+    private fun isValidInputLength(fieldType: FieldType, value: String): Boolean {
+        if (value.isBlank() || value.length < MIN_INPUT_LENGTH) {
+            return false
+        }
+
+        // Basic content quality validation
+        if (!isValidContent(fieldType, value)) {
+            return false
+        }
+
+        val maxLength = when (fieldType) {
+            FieldType.FIRST_NAME, FieldType.LAST_NAME -> MAX_NAME_LENGTH
+            FieldType.FULL_NAME -> MAX_NAME_LENGTH * 2
+            FieldType.EMAIL -> MAX_EMAIL_LENGTH
+            FieldType.PHONE -> MAX_PHONE_LENGTH
+            FieldType.ADDRESS -> MAX_ADDRESS_LENGTH
+            FieldType.CITY -> MAX_CITY_LENGTH
+            FieldType.STATE -> MAX_STATE_LENGTH
+            FieldType.ZIP -> MAX_ZIP_LENGTH
+            FieldType.COMPANY -> MAX_COMPANY_LENGTH
+            FieldType.USERNAME -> MAX_USERNAME_LENGTH
+            FieldType.UNKNOWN -> return false
+        }
+
+        if (value.length > maxLength) {
+            Log.w("FormDataValidation", "Input too long for $fieldType: ${value.length} > $maxLength chars")
+            return false
+        }
+
+        return true
+    }
+
+    private fun isValidContent(fieldType: FieldType, value: String): Boolean {
+        // Skip validation for very short inputs that are likely partial typing
+        if (value.length < 3) return true
+
+        // Check for obvious corrupted data patterns
+        if (hasRepeatingCharacters(value) || hasRandomCharacterPattern(value)) {
+            Log.w("FormDataValidation", "Suspicious character pattern in $fieldType: '$value'")
+            return false
+        }
+
+        return when (fieldType) {
+            FieldType.EMAIL -> isValidEmailPattern(value)
+            FieldType.PHONE -> isValidPhonePattern(value)
+            FieldType.ZIP -> isValidZipPattern(value)
+            FieldType.FIRST_NAME, FieldType.LAST_NAME, FieldType.FULL_NAME -> isValidNameContent(value)
+            FieldType.CITY, FieldType.STATE -> isValidLocationContent(value)
+            else -> true // Other fields use generic validation only
+        }
+    }
+
+    private fun hasRepeatingCharacters(value: String): Boolean {
+        // Check for excessive repeating characters (like "aaaaaaa" or "1111111")
+        val threshold = if (value.length < 10) 4 else 6
+        var currentChar = value[0]
+        var count = 1
+        
+        for (i in 1 until value.length) {
+            if (value[i] == currentChar) {
+                count++
+                if (count >= threshold) return true
+            } else {
+                currentChar = value[i]
+                count = 1
+            }
+        }
+        return false
+    }
+
+    private fun hasRandomCharacterPattern(value: String): Boolean {
+        // Check for keyboard mashing patterns or random character sequences
+        if (value.length < 8) return false
+        
+        // Count different character types
+        var letters = 0
+        var digits = 0
+        var symbols = 0
+        
+        value.forEach { char ->
+            when {
+                char.isLetter() -> letters++
+                char.isDigit() -> digits++
+                else -> symbols++
+            }
+        }
+        
+        val totalChars = value.length
+        // If more than 30% are symbols, likely random input
+        return symbols > (totalChars * 0.3)
+    }
+
+    private fun isValidEmailPattern(value: String): Boolean {
+        // Basic email structure check (not comprehensive validation)
+        return value.contains("@") && 
+               value.indexOf("@") > 0 && 
+               value.indexOf("@") < value.length - 1 &&
+               value.count { it == '@' } == 1 &&
+               !value.startsWith("@") &&
+               !value.endsWith("@")
+    }
+
+    private fun isValidPhonePattern(value: String): Boolean {
+        // Remove common phone formatting characters
+        val cleaned = value.replace(Regex("[\\s\\-\\(\\)\\+\\.]"), "")
+        
+        // Should be mostly digits with reasonable length
+        val digitCount = cleaned.count { it.isDigit() }
+        return digitCount >= 7 && digitCount <= 15 && // International phone number range
+               digitCount > (cleaned.length * 0.7) // At least 70% digits
+    }
+
+    private fun isValidZipPattern(value: String): Boolean {
+        // ZIP codes should be mostly numeric or alphanumeric
+        val alphanumericCount = value.count { it.isLetterOrDigit() }
+        return alphanumericCount > (value.length * 0.8) // At least 80% alphanumeric
+    }
+
+    private fun isValidNameContent(value: String): Boolean {
+        // Names should be mostly letters with some spaces, hyphens, apostrophes
+        val validChars = value.count { it.isLetter() || it == ' ' || it == '-' || it == '\'' || it == '.' }
+        val letterCount = value.count { it.isLetter() }
+        
+        return letterCount >= 2 && // At least 2 letters
+               validChars > (value.length * 0.8) && // 80% valid name characters
+               !value.all { it.isDigit() } // Not all numbers
+    }
+
+    private fun isValidLocationContent(value: String): Boolean {
+        // Cities/states should be mostly letters with spaces, periods, hyphens
+        val validChars = value.count { it.isLetter() || it == ' ' || it == '.' || it == '-' }
+        val letterCount = value.count { it.isLetter() }
+        
+        return letterCount >= 2 && // At least 2 letters
+               validChars > (value.length * 0.7) && // 70% valid location characters
+               !value.all { it.isDigit() } // Not all numbers
     }
 }
