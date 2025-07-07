@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Bobble Brand Colors (same in all themes) -->
+    <color name="primary_color">#00BC84</color>
+    <color name="primary_color_light">#4DCEB4</color>
+    <color name="primary_color_dark">#00A371</color>
+    
+    <!-- Suggestion UI Colors - Dark Theme -->
+    <color name="suggestion_background">#1F1F1F</color>
+    <color name="suggestion_text_color">#FFFFFF</color>
+    <color name="suggestion_stroke_color">@color/primary_color</color>
+    <color name="suggestion_pressed_background">@color/primary_color</color>
+    <color name="suggestion_pressed_text">#FFFFFF</color>
+    
+    <!-- Background and Surface Colors - Dark Theme -->
+    <color name="suggestion_bar_background">#141414</color>
+    <color name="suggestion_shadow">#4D000000</color>
+</resources>
