@@ -11,19 +11,29 @@ class FormDataManager(context: Context) {
     private val prefs: SharedPreferences = context.getSharedPreferences("form_autofill", Context.MODE_PRIVATE)
     private val metadataPrefs: SharedPreferences = context.getSharedPreferences("suggestion_metadata", Context.MODE_PRIVATE)
 
-    private val fieldTries: Map<FieldType, SuggestionTrie> = FieldType.values()
-        .filter { it != FieldType.UNKNOWN }
-        .associateWith { SuggestionTrie() }
+    private val fieldTries = mutableMapOf<FieldType, SuggestionTrie>()
 
+    private fun getOrCreateTrie(fieldType: FieldType): SuggestionTrie {
+        return fieldTries.getOrPut(fieldType) { 
+            SuggestionTrie().also { trie ->
+                loadTrieFromStorage(fieldType, trie)
+            }
+        }
+    }
+
+    private fun loadTrieFromStorage(fieldType: FieldType, trie: SuggestionTrie) {
+        val suggestions = getFieldSuggestions(fieldType)
+        suggestions.forEach { suggestion ->
+            val key = generateStorageKey(fieldType, suggestion)
+            trie.insert(suggestion, key)
+        }
+        Log.d("SuggestionDebug", "Lazy loaded ${suggestions.size} suggestions into $fieldType trie")
+    }
 
     private val hotCache = mutableMapOf<String, List<RankedSuggestion>>()
     private val cacheAccessOrder = mutableListOf<String>()
     private val maxCacheSize = 50
 
-    init {
-        // Load existing data into tries on startup
-        initializeTriesFromStorage()
-    }
 
     companion object {
         private const val MAX_STORED_PER_FIELD = 10
@@ -45,7 +55,7 @@ class FormDataManager(context: Context) {
     }
 
     // ============================================
-    // Core Data Structures
+    // Data Structures
 
     data class SuggestionNode(
         val value: String,
@@ -73,7 +83,7 @@ class FormDataManager(context: Context) {
             }
         }
 
-        // Add helper for debugging
+        // for debugging
         fun getDetailedScore(): String {
             val conf = clickCount * 0.4f
             val freq = useCount * 0.35f
@@ -97,7 +107,7 @@ class FormDataManager(context: Context) {
     }
 
     // ============================================
-    // Simplified Storage Strategy
+    // Storage
 
     fun learnFromInput(fieldType: FieldType, value: String) {
         val cleanValue = value.trim()
@@ -124,20 +134,60 @@ class FormDataManager(context: Context) {
             storeMetadata(key, existing)
 
             val newScore = existing.getRankingScore()
-            Log.d("SuggestionDebug", "✅ Updated: useCount=${existing.useCount}")
+            Log.d("SuggestionDebug", "Updated: useCount=${existing.useCount}")
             Log.d("SuggestionDebug", "Recency: ${if (wasRecent) "was recent" else "got recency boost"}")
             Log.d("SuggestionDebug", "Score: $oldScore → $newScore")
         } else {
             val newNode = SuggestionNode(cleanValue, clickCount = 0, useCount = 1)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ New entry: useCount=1, fresh recency=1.0")
+            Log.d("SuggestionDebug", "New entry: useCount=1, fresh recency=1.0")
         }
 
         clearCacheForFieldType(fieldType)
         logCacheState("after_learn_${fieldType}")
         val finalCount = getFieldSuggestions(fieldType).size
         Log.d("EdgeDebug", "Field $fieldType: final_entries=$finalCount after learning '$cleanValue'")
+    }
+
+    fun saveImmediately(fieldType: FieldType, value: String, isFromSuggestionClick: Boolean = false) {
+        val cleanValue = value.trim()
+        Log.d("FormAutofillIntegration", "=== IMMEDIATE SAVE ===")
+        Log.d("FormAutofillIntegration", "Field: $fieldType, Value: '$cleanValue', FromClick: $isFromSuggestionClick")
+
+        if (!isValidInputLength(fieldType, cleanValue)) {
+            Log.d("FormAutofillIntegration", "Validation failed - skipping save")
+            return
+        }
+
+        val key = generateStorageKey(fieldType, cleanValue)
+        val existing = getMetadata(key)
+
+        if (existing != null) {
+            val oldScore = existing.getRankingScore()
+            existing.useCount++
+            if (isFromSuggestionClick) {
+                existing.clickCount++
+            }
+            existing.lastUsed = System.currentTimeMillis()
+            storeMetadata(key, existing)
+
+            val newScore = existing.getRankingScore()
+            Log.d("FormAutofillIntegration", "UPDATED: useCount=${existing.useCount}, clickCount=${existing.clickCount}")
+            Log.d("FormAutofillIntegration", "Score: $oldScore → $newScore")
+        } else {
+            val newNode = SuggestionNode(
+                cleanValue, 
+                clickCount = if (isFromSuggestionClick) 1 else 0, 
+                useCount = 1
+            )
+            storeMetadata(key, newNode)
+            addToFieldList(fieldType, cleanValue)
+            Log.d("FormAutofillIntegration", "NEW ENTRY: useCount=1, clickCount=${newNode.clickCount}")
+        }
+
+        clearCacheForFieldType(fieldType)
+        Log.d("FormAutofillIntegration", "IMMEDIATE SAVE COMPLETE")
     }
 
     fun confirmSuggestion(fieldType: FieldType, value: String) {
@@ -156,17 +206,18 @@ class FormDataManager(context: Context) {
         if (existing != null) {
             val oldScore = existing.getRankingScore()
             existing.clickCount++
+            existing.useCount++
             existing.lastUsed = System.currentTimeMillis()
             storeMetadata(key, existing)
 
             val newScore = existing.getRankingScore()
-            Log.d("SuggestionDebug", "✅ UPDATED: clickCount ${existing.clickCount-1} → ${existing.clickCount}")
-            Log.d("SuggestionDebug", "Score: $oldScore → $newScore (recency boost)")
+            Log.d("SuggestionDebug", "UNIFIED SAVE: clickCount=${existing.clickCount}, useCount=${existing.useCount}")
+            Log.d("SuggestionDebug", "Score: $oldScore → $newScore (click + use + recency)")
         } else {
-            val newNode = SuggestionNode(cleanValue, clickCount = 1, useCount = 0)
+            val newNode = SuggestionNode(cleanValue, clickCount = 1, useCount = 1)
             storeMetadata(key, newNode)
             addToFieldList(fieldType, cleanValue)
-            Log.d("SuggestionDebug", "✅ NEW ENTRY: clickCount=1, recency=1.0")
+            Log.d("SuggestionDebug", "NEW UNIFIED ENTRY: clickCount=1, useCount=1")
         }
 
         clearCacheForFieldType(fieldType)
@@ -181,12 +232,12 @@ class FormDataManager(context: Context) {
         val cached = hotCache[cacheKey]
         if (cached != null) {
             updateCacheAccess(cacheKey)
-            Log.d("CacheDebug", "✅ CACHE HIT: key='$cacheKey'")
+            Log.d("CacheDebug", "CACHE HIT: key='$cacheKey'")
             return cached.map { it.value }.take(MAX_DISPLAYED_SUGGESTIONS)
         }
-        Log.d("CacheDebug", "❌ CACHE MISS: key='$cacheKey', reason= not_found")
+        Log.d("CacheDebug", "CACHE MISS: key='$cacheKey', reason= not_found")
 
-        val trie = fieldTries[fieldType] ?: return emptyList()
+        val trie = getOrCreateTrie(fieldType)
 
         val matchingKeys = if (partialInput.isBlank()) {
             trie.getAllStorageKeys()
@@ -199,7 +250,7 @@ class FormDataManager(context: Context) {
             val metadata = getMetadata(key)
             if (metadata != null) {
                 val score = metadata.getRankingScore()
-                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': score=$score, lastUsed=${metadata.lastUsed}")
+                Log.d("SuggestionDebug", "Suggestion '${metadata.value}': score=$score, useCount = ${metadata.useCount}, clickCount = ${metadata.clickCount}, lastUsed=${metadata.lastUsed}")
                 RankedSuggestion(metadata.value, score, metadata.lastUsed) // Add timestamp
             } else null
         }.sortedWith(compareByDescending<RankedSuggestion> { it.score }
@@ -238,11 +289,12 @@ class FormDataManager(context: Context) {
             hint.contains("username") -> FieldType.USERNAME
             else -> {
                 val inputVariation = inputType and InputType.TYPE_MASK_VARIATION
+                val inputClass = inputType and InputType.TYPE_MASK_CLASS
                 when {
                     inputVariation == InputType.TYPE_TEXT_VARIATION_EMAIL_ADDRESS -> FieldType.EMAIL
                     inputVariation == InputType.TYPE_TEXT_VARIATION_PERSON_NAME -> FieldType.FULL_NAME
                     inputVariation == InputType.TYPE_TEXT_VARIATION_POSTAL_ADDRESS -> FieldType.ADDRESS
-                    inputType and InputType.TYPE_CLASS_PHONE != 0 -> FieldType.PHONE
+                    inputClass == InputType.TYPE_CLASS_PHONE -> FieldType.PHONE
                     else -> FieldType.UNKNOWN
                 }
             }
@@ -270,7 +322,6 @@ class FormDataManager(context: Context) {
         return try {
             when (parts.size) {
                 3 -> {
-                    // Legacy format: value|frequency|lastUsed -> convert to new format
                     SuggestionNode(
                         value = parts[0],
                         clickCount = 0,
@@ -279,7 +330,6 @@ class FormDataManager(context: Context) {
                     )
                 }
                 4 -> {
-                    // New format: value|clickCount|useCount|lastUsed
                     SuggestionNode(
                         value = parts[0],
                         clickCount = parts[1].toInt(),
@@ -337,7 +387,7 @@ class FormDataManager(context: Context) {
             if (lowestScoringEntry != null) {
                 val evictedKey = generateStorageKey(fieldType, lowestScoringEntry)
                 val evictedMetadata = getMetadata(evictedKey)
-                Log.d("EdgeDebug", "🗑️ EVICTED: '$lowestScoringEntry' (score=${evictedMetadata?.getRankingScore()}, lastUsed=${evictedMetadata?.lastUsed})")
+                Log.d("EdgeDebug", "EVICTED: '$lowestScoringEntry' (score=${evictedMetadata?.getRankingScore()}, lastUsed=${evictedMetadata?.lastUsed})")
 
                 existing.remove(lowestScoringEntry)
                 removeMetadata(fieldType, lowestScoringEntry)
@@ -349,9 +399,9 @@ class FormDataManager(context: Context) {
         prefs.edit().putStringSet(listKey, existing).apply()
 
         // Add to trie
-        val trie = fieldTries[fieldType]
+        val trie = getOrCreateTrie(fieldType)
         val storageKey = generateStorageKey(fieldType, value)
-        trie?.insert(value, storageKey)
+        trie.insert(value, storageKey)
 
         // Replace the log at end of method:
         Log.d("EdgeDebug", "=== FIELD STORAGE UPDATE ===")
@@ -359,7 +409,7 @@ class FormDataManager(context: Context) {
         Log.d("EdgeDebug", "Before: ${existing.size - 1} entries, After: ${existing.size} entries")
         Log.d("EdgeDebug", "Capacity check: ${existing.size}/$MAX_STORED_PER_FIELD")
         if (existing.size > MAX_STORED_PER_FIELD) {
-            Log.d("EdgeDebug", "⚠️ OVER CAPACITY - eviction will be triggered")
+            Log.d("EdgeDebug", "OVER CAPACITY - eviction will be triggered")
         }
     }
 
@@ -368,8 +418,8 @@ class FormDataManager(context: Context) {
         metadataPrefs.edit().remove(key).apply()
 
         // NEW: Remove from trie
-        val trie = fieldTries[fieldType]
-        trie?.remove(value, key)
+        val trie = getOrCreateTrie(fieldType)
+        trie.remove(value, key)
     }
 
     private fun applyAgeDecay(fieldType: FieldType) {
@@ -392,9 +442,9 @@ class FormDataManager(context: Context) {
                     metadata.useCount = (metadata.useCount * DECAY_FACTOR).toInt().coerceAtLeast(1)
                     metadata.clickCount = (metadata.clickCount * DECAY_FACTOR).toInt()
                     storeMetadata(key, metadata)
-                    Log.d("EdgeDebug", "⏳ AGED: '$suggestion' - uses: $oldUseCount→${metadata.useCount}, clicks: $oldClickCount→${metadata.clickCount}")
+                    Log.d("EdgeDebug", "AGED: '$suggestion' - uses: $oldUseCount→${metadata.useCount}, clicks: $oldClickCount→${metadata.clickCount}")
                 } else {
-                    Log.d("EdgeDebug", "✅ FRESH: '$suggestion' (${daysSinceLastUsed.toInt()} days old)")
+                    Log.d("EdgeDebug", "FRESH: '$suggestion' (${daysSinceLastUsed.toInt()} days old)")
                 }
             }
         }
@@ -429,14 +479,14 @@ class FormDataManager(context: Context) {
             val oldestKey = cacheAccessOrder.removeFirstOrNull()
             oldestKey?.let {
                 hotCache.remove(it)
-                Log.d("CacheDebug", "🗑️ EVICTED oldest: '$it' (cache was full)")
+                Log.d("CacheDebug", "EVICTED oldest: '$it' (cache was full)")
             }
         }
 
         hotCache[key] = result
         cacheAccessOrder.add(key)
 
-        Log.d("CacheDebug", "✅ STORED: cache_size=${hotCache.size}, access_order_size=${cacheAccessOrder.size}")
+        Log.d("CacheDebug", "STORED: cache_size=${hotCache.size}, access_order_size=${cacheAccessOrder.size}")
         Log.d("CacheDebug", "Recent access order: ${cacheAccessOrder.takeLast(3)}")
     }
 
@@ -444,7 +494,7 @@ class FormDataManager(context: Context) {
         val wasPresent = cacheAccessOrder.remove(key)
         cacheAccessOrder.add(key)
 
-        Log.d("CacheDebug", "♻️ ACCESS UPDATE: key='$key', was_present=$wasPresent")
+        Log.d("CacheDebug", "ACCESS UPDATE: key='$key', was_present=$wasPresent")
         Log.d("CacheDebug", "New access order (last 3): ${cacheAccessOrder.takeLast(3)}")
     }
 
@@ -466,13 +516,13 @@ class FormDataManager(context: Context) {
 
         // Only compress trie if significant changes occurred
         if (keysToRemove.isNotEmpty()) {
-            val trie = fieldTries[fieldType]
-            trie?.compress()
-            Log.d("CacheDebug", "✅ Cleared ${keysToRemove.size} cache entries for $fieldType + compressed trie")
+            val trie = getOrCreateTrie(fieldType)
+            trie.compress()
+            Log.d("CacheDebug", "Cleared ${keysToRemove.size} cache entries for $fieldType + compressed trie")
         }
     }
 
-    // Helper method for debugging cache state
+    // debugging cache state
     private fun logCacheState(context: String) {
         Log.d("CacheDebug", "=== CACHE STATE: $context ===")
         Log.d("CacheDebug", "Cache size: ${hotCache.size}/$maxCacheSize")
@@ -484,23 +534,6 @@ class FormDataManager(context: Context) {
     // ============================================
     // Trie utils
 
-    private fun initializeTriesFromStorage() {
-        Log.d("SuggestionDebug", "Initializing tries from storage...")
-
-        FieldType.values().forEach { fieldType ->
-            if (fieldType == FieldType.UNKNOWN) return@forEach
-
-            val suggestions = getFieldSuggestions(fieldType)
-            val trie = fieldTries[fieldType]
-
-            suggestions.forEach { suggestion ->
-                val key = generateStorageKey(fieldType, suggestion)
-                trie?.insert(suggestion, key)
-            }
-
-            Log.d("SuggestionDebug", "Loaded ${suggestions.size} suggestions into $fieldType trie")
-        }
-    }
     // ============================================
     // Data validations
     private fun isValidInputLength(fieldType: FieldType, value: String): Boolean {

@@ -69,6 +69,7 @@ class AutofillIntegration private constructor(
         autofillManager?.onFieldChanged()
     }
 
+
     /**
      * Notify when keyboard is hidden/input session ends
      * Call this in onFinishInput() and onFinishInputView()
